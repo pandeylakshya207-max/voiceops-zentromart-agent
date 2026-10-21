@@ -15,6 +15,11 @@ from types import SimpleNamespace
 from .config import LLM_MODELS, LLM_TEMPERATURE
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+PROVIDERS = ("groq", "gemini", "cerebras")
+KEY_ENV = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY", "cerebras": "CEREBRAS_API_KEY"}
+# Minimum seconds between calls per provider (Cerebras free tier: 5 requests/minute)
+MIN_INTERVAL = {"cerebras": float(os.getenv("CEREBRAS_MIN_INTERVAL", "12.5"))}
 
 
 class LLMError(RuntimeError):
@@ -22,7 +27,7 @@ class LLMError(RuntimeError):
 
 
 def _split(entry: str):
-    if ":" in entry and entry.split(":", 1)[0] in ("groq", "gemini"):
+    if ":" in entry and entry.split(":", 1)[0] in PROVIDERS:
         return tuple(entry.split(":", 1))
     return "groq", entry
 
@@ -30,10 +35,11 @@ def _split(entry: str):
 class LLM:
     def __init__(self, models=None, verbose: bool = False):
         entries = [_split(m) for m in (models or LLM_MODELS)]
-        keys = {"groq": os.getenv("GROQ_API_KEY"), "gemini": os.getenv("GEMINI_API_KEY")}
-        self.entries = [(p, m) for p, m in entries if keys.get(p)]
+        self.entries = [(p, m) for p, m in entries if os.getenv(KEY_ENV[p])]
         if not self.entries:
-            raise LLMError("No usable model: set GROQ_API_KEY (and optionally GEMINI_API_KEY) in .env")
+            raise LLMError("No usable model: set the API key for a model in LLM_MODELS in .env "
+                           "(GROQ_API_KEY, CEREBRAS_API_KEY or GEMINI_API_KEY)")
+        self._last_call = {}
         self._clients = {}
         self.idx = 0
         self.verbose = verbose
@@ -55,6 +61,10 @@ class LLM:
             if provider == "groq":
                 from groq import Groq
                 self._clients[provider] = Groq(max_retries=1, timeout=60)
+            elif provider == "cerebras":
+                from openai import OpenAI
+                self._clients[provider] = OpenAI(api_key=os.getenv("CEREBRAS_API_KEY"),
+                                                 base_url=CEREBRAS_BASE_URL, max_retries=0, timeout=120)
             else:
                 from openai import OpenAI
                 self._clients[provider] = OpenAI(api_key=os.getenv("GEMINI_API_KEY"),
@@ -79,6 +89,10 @@ class LLM:
             kw["max_completion_tokens"] = max_tokens
             if model.startswith("openai/gpt-oss"):
                 kw["extra_body"] = {"reasoning_effort": "low"}
+        elif provider == "cerebras":
+            kw["max_completion_tokens"] = max_tokens + 500
+            if "gpt-oss" in model and not lite:
+                kw["reasoning_effort"] = "low"
         else:
             kw["max_tokens"] = max_tokens + 1000  # Gemini's thinking tokens count against this
             effort = os.getenv("GEMINI_REASONING", "")  # e.g. "low"; empty = provider default
@@ -94,6 +108,10 @@ class LLM:
             attempt += 1
             provider, model = self.entries[self.idx]
             kwargs = self._kwargs(provider, model, messages, tools, tool_choice, json_mode, max_tokens, lite)
+            gap = MIN_INTERVAL.get(provider, 0) - (time.time() - self._last_call.get(provider, 0))
+            if gap > 0:
+                time.sleep(gap)  # stay under the provider's requests-per-minute limit
+            self._last_call[provider] = time.time()
             t0 = time.time()
             try:
                 resp = self._client(provider).chat.completions.create(**kwargs)
@@ -154,7 +172,7 @@ class LLM:
                     err = body.get("error", body) if isinstance(body, dict) else {}
                     gen = err.get("failed_generation") if isinstance(err, dict) else None
                     return SimpleNamespace(content=gen or "", tool_calls=None)
-                if status == 400 and provider == "gemini" and not lite:
+                if status in (400, 422) and provider in ("gemini", "cerebras") and not lite:
                     lite = True  # drop optional params (reasoning_effort) and retry
                     continue
                 if status == 400 and attempt <= 2 and json_mode:

@@ -110,6 +110,13 @@ class Agent:
         return res
 
     def _create_ticket(self, summary="", order_id=None, reason=None, intent=None, **_):
+        t = getattr(self, "_turn_text", "")
+        only_verifying = (len(re.findall(r"[^\W\d_]+", t)) <= 6 and re.search(r"\d", t)
+                          and not any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE)))
+        if only_verifying and not self.state.locked:  # locked = verification failed twice: handover is right
+            return {"created": False, "error": "The caller has only given verification details this turn and has "
+                    "not asked for anything yet. Confirm verification and continue with what they asked; "
+                    "raise a ticket only when they request something a human must decide."}
         oid = re.sub(r"\D", "", str(order_id or self.state.order_id or "")) or None
         res = self.tools.create_ticket(summary, order_id=oid, reason=reason, intent=intent)
         if res.get("created"):
@@ -181,7 +188,7 @@ class Agent:
         return " ".join(parts)
 
     # ------------------------------------------------------------------ voice repair
-    def _scripted(self, user_text, norm, reply, decision="clarify") -> dict:
+    def _scripted(self, user_text, norm, reply, decision="clarify", tool_calls=None, retrieved=None) -> dict:
         """A turn answered by code (no LLM): e.g. asking to repeat a misheard number."""
         lang = self.state.lang or reply_language(user_text)
         if self.state.turns == 0:
@@ -189,8 +196,10 @@ class Agent:
         self.history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
         self.state.turns += 1
         self.last_turn = {"user": user_text, "normalized": norm["text"], "entities": norm["entities"],
-                          "reply": reply, "decision": decision, "tool_calls": [], "raw_final": "[scripted]",
-                          "retrieved": [], "evidence": [], "chunks": []}
+                          "reply": reply, "decision": decision, "tool_calls": tool_calls or [],
+                          "raw_final": "[scripted]", "retrieved": retrieved or [], "evidence": [],
+                          "chunks": [{"id": cid, "text": self.kb.by_id[cid].text} for cid in (retrieved or [])
+                                     if cid in self.kb.by_id]}
         return self.last_turn
 
     def _repair(self, user_text, norm):
@@ -224,15 +233,32 @@ class Agent:
             return self._scripted(user_text, norm, msg)
         return None
 
+    def _opener(self, user_text, norm):
+        """'Hi, I need help with my order' with nothing else: greet as the AI assistant, ask for the order ID."""
+        if (self.state.order_id or norm["entities"] or not GENERIC_HELP_RE.search(user_text)
+                or DETAILS_RE.search(norm["text"]) or len(user_text.split()) > 14):
+            return None
+        lang = reply_language(user_text)
+        self.state.lang = lang
+        msg = {"en": "Sure, I can help with that. Could you please tell me your order ID?",
+               "hi-en": "Zaroor, main madad karti hoon. Kripya apna order ID bataiye.",
+               "hi": "ज़रूर, मैं मदद करती हूँ। कृपया अपना ऑर्डर आईडी बताइए।"}[lang]
+        turn = self._scripted(user_text, norm, msg, "clarify")
+        hits = self.kb.search(norm["text"] + " greeting introduce AI assistant ask order id verification", k=3)
+        turn["retrieved"] = [c.id for c, _ in hits]
+        return turn
+
     def turn(self, user_text: str) -> dict:
         self._turn_retrieved = []
+        self._turn_text = user_text
         norm = normalize(user_text, data.sku_prefixes())
-        repaired = self._repair(user_text, norm)
+        repaired = self._repair(user_text, norm) or self._opener(user_text, norm)
         if repaired:
             return repaired
         hits = self.kb.search(self._retrieval_query(norm["text"]), k=self.top_k)
         # Approval / compensation / exception requests: always bring in who-decides & handover rules
-        if any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE) for t in (user_text, norm["text"])):
+        if any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE, REPEAT_RE, REFUND_STATUS_RE)
+               for t in (user_text, norm["text"])):
             have = {c.id for c, _ in hits}
             for c, sc in self.kb.search("escalation human handover who decides approval threshold "
                                         "priority resolution compensation " + norm["text"], k=4):
@@ -251,6 +277,15 @@ class Agent:
         if norm["entities"]:
             user_block.append(f"Detected: {json.dumps(norm['entities'])}")
         pre_tools = self._auto_order_tools(norm)
+        failed = [t for t in pre_tools if t["args"].get("verification_value") and t["result"].get("verified") is False]
+        if failed:  # security-critical wording is written by code, not improvised by the model
+            lang_v = self.state.lang if (self.state.lang and reply_language(user_text) == "en") else reply_language(user_text)
+            self.state.lang = lang_v
+            hits_v = [c.id for c, _ in self.kb.search("caller identity verification failed retry lock human", k=3)]
+            if self.state.locked:
+                msg = VERIFY_LOCKED[lang_v]
+                return self._scripted(user_text, norm, msg, "refuse", pre_tools, hits_v)
+            return self._scripted(user_text, norm, VERIFY_RETRY[lang_v], "clarify", pre_tools, hits_v)
         for t in pre_tools:
             user_block.append(f"System already called {t['name']}({json.dumps(t['args'])}) for this turn -> "
                               f"{json.dumps(t['result'], ensure_ascii=False, default=str)[:600]}")
@@ -273,6 +308,8 @@ class Agent:
                     + [{"role": "user", "content": "\n".join(user_block)}])
 
         tool_log, evidence, final, raw_final = list(pre_tools), [], None, ""
+        locked_before = self.state.locked and not any(
+            t["name"] == "lookup_order" and t["args"].get("verification_value") for t in pre_tools)
         for t in pre_tools:
             evidence.extend(t.get("evidence", []))
         if auto_products:
@@ -322,13 +359,15 @@ class Agent:
                         "Final message in the DECISION/EVIDENCE/REPLY format.")})
                     final = None
                     continue
-                missing_spec = [] if spec_checked else _missing_specs(user_text + " " + norm["text"],
-                                                                      auto_products, final["reply"] or "")
+                missing_spec = [] if spec_checked else (
+                    _missing_specs(user_text + " " + norm["text"], auto_products, final["reply"] or "")
+                    + _missing_refund_facts(user_text, self.state.verified_orders.get(self.state.order_id or ""),
+                                            final["reply"] or ""))
                 if missing_spec and round_ < MAX_TOOL_ROUNDS:
                     spec_checked = True
                     messages.append({"role": "assistant", "content": raw_final})
                     messages.append({"role": "user", "content": (
-                        "Check: include the exact catalog fact the customer asked about: " + "; ".join(missing_spec)
+                        "Check: your reply must also include: " + "; ".join(missing_spec)
                         + ". Final message in the DECISION/EVIDENCE/REPLY format.")})
                     final = None
                     continue
@@ -395,18 +434,19 @@ class Agent:
                 # 2) damage reports: is a human team required (e.g. value thresholds)?
                 ticketed = any(t["name"] == "create_ticket" for t in tool_log) or self.state.tickets
                 if (not damage_checked and not ticketed and round_ < MAX_TOOL_ROUNDS
-                        and (DAMAGE_RE.search(user_text + " " + norm["text"])
-                             or SECURITY_RE.search(user_text + " " + norm["text"]))
+                        and any(rx.search(user_text + " " + norm["text"])
+                                for rx in (DAMAGE_RE, SECURITY_RE, REPEAT_RE, REFUND_STATUS_RE))
                         and final.get("decision") in (None, "answer", "clarify")):
                     damage_checked = True
                     price = ", ".join(f"{p.get('sku')}: " + ", ".join(f"{k}={v}" for k, v in p.items() if "price" in k)
                                       for p in auto_products) or "unknown"
                     messages.append({"role": "assistant", "content": raw_final})
                     messages.append({"role": "user", "content": (
-                        f"Check: this is a damage/wrong/missing-item or account-security report (catalog price: "
-                        f"{price}). Re-read the damaged-item, payment/security and escalation sections: if they say a "
-                        "specific team must handle this case "
-                        "(e.g. above a value threshold), call create_ticket now and tell the customer it has been "
+                        f"Check: this is a damage/wrong/missing-item, account-security, refund-status or repeat-contact "
+                        f"case (catalog price: {price}). Re-read the escalation, damaged-item, refund and security "
+                        "sections and the order record (e.g. how long ago a refund was initiated vs its timeline, use "
+                        "date_calc): if they say a person or specific team must handle this case "
+                        "(value threshold, overdue refund, repeated contacts…), call create_ticket now and tell the customer it has been "
                         "passed to that team (DECISION: escalate). Otherwise keep your answer. "
                         "Final message in the DECISION/EVIDENCE/REPLY format.")})
                     final = None
@@ -451,17 +491,36 @@ class Agent:
         decision = final.get("decision")
         if decision not in ("answer", "clarify", "escalate", "refuse"):
             decision = "escalate" if tickets_this_turn else ("clarify" if reply.endswith("?") else "answer")
-        if decision == "clarify" and not self.state.order_id and _answers_first(reply):
-            decision = "answer"  # it gave the answer and only added a follow-up question
-        if verified_now and decision == "clarify":
-            decision = "answer"  # verification completed this turn: that is a resolved step, not a question
+        # The label follows what actually happened in this turn (models mislabel often):
+        asks_id = (not self.state.verified_orders and not self.state.locked
+                   and (ASK_ORDER_RE.search(reply) or VERIFY_ASK_RE.search(reply))
+                   and re.search(r"\?|kripya|please|batay|bataiye|share|कृपया|बताइए", reply, re.I))
+        locked_now = self.state.locked and not locked_before
+        refused = (not tickets_this_turn and (APPROVAL_RE.search(user_text) or CANCEL_REQ_RE.search(user_text))
+                   and NEG_RE.search(reply))
+        if tickets_this_turn:
+            decision = "escalate"
+        elif locked_now:
+            decision = "refuse"  # second failed verification: details are refused (a human is offered)
+        elif refused:
+            decision = "refuse"  # the customer asked for something the policy does not allow
+        elif verified_now:
+            decision = "answer"  # verification completed this turn: a resolved step, not a question
+        elif asks_id:
+            decision = "clarify"  # it is waiting for the order ID or verification digits
+        elif decision == "clarify" and (_answers_first(reply) or OFFER_RE.search(_last_sentence(reply))):
+            decision = "answer"  # it answered and only added an offer / follow-up question
 
+        if decision == "refuse" and not APOLOGY_RE.search(reply):
+            reply = {"hi": "माफ़ कीजिए, ", "hi-en": "Maaf kijiye, "}.get(lang, "Sorry, ") + reply[:1].lower() + reply[1:]
         # Guard: an escalation must be backed by a real ticket (never claim what code didn't do).
         if decision == "escalate" and not tickets_this_turn and not self.state.tickets:
             summary = (f"Customer request: {user_text.strip()[:300]} | Agent reply: {reply[:300]} | "
                        f"Order: {self.state.order_id or 'n/a'}; verified: {bool(self.state.verified_orders)}")
             res = self._create_ticket(summary=summary, reason="Escalated by agent decision", intent="handover")
             tool_log.append({"name": "create_ticket", "args": {"summary": summary, "auto": True}, "result": _brief(res)})
+            if not res.get("created"):
+                decision = "answer"  # no ticket exists, so this turn is not a handover
 
         if not reply:
             reply = {"hi": "माफ़ कीजिए, कृपया दोबारा बताइए।", "hi-en": "Sorry, kya aap dobara bata sakte hain?"}.get(
@@ -521,6 +580,21 @@ SECURITY_RE = re.compile(r"never placed|didn'?t place|did not place|not placed b
                          r"maine (?:order )?nahi kiya|मैंने .*नहीं किया|धोखा", re.I)
 
 
+GENERIC_HELP_RE = re.compile(r"\b(help|assist|madad|sahayata|problem|issue)\b|मदद|सहायता|समस्या", re.I)
+CANCEL_REQ_RE = re.compile(r"want to cancel|cancel (?:it|this|my order)|cancel kar(?:na| do| dijiye)|"
+                           r"cancel karna hai|कैंसिल कर(?:ना|ो|दो|दीजिए)|रद्द कर(?:ना|ो|दो|दीजिए)", re.I)
+NEG_RE = re.compile(r"cannot|can't|can not|not possible|unable|not be cancel|not eligible|no compensation|"
+                    r"possible nahi|sambhav nahi|nahi ho sakta|nahi kar sakt|nahi kiya ja sakta|"
+                    r"nahi (?:diya|kiya|ho|mil)|nahin (?:diya|kiya|ho)|nahi ja|संभव नहीं|नहीं (?:किया|दिया|हो|मिल)|"
+                    r"नहीं जा", re.I)
+APOLOGY_RE = re.compile(r"sorry|apolog|maaf|माफ़|माफ|क्षमा", re.I)
+REPEAT_RE = re.compile(r"(?:second|third|fourth|3rd|2nd|many|multiple|several) times?|again and again|"
+                       r"calling again|baar baar|kitni baar|teesri baar|doosri baar|तीसरी बार|बार-बार|बार बार", re.I)
+REFUND_STATUS_RE = re.compile(r"where is my refund|refund (?:not|hasn'?t|has not|still not)|haven'?t (?:got|received) "
+                              r"(?:my )?refund|refund kahan|refund kab|refund nahi (?:aaya|mila)|"
+                              r"रिफ़ंड कहाँ|रिफंड कहाँ|रिफ़ंड नहीं|रिफंड नहीं", re.I)
+
+
 WHEN_RE = re.compile(r"\bwhen\b|by when|how long|kab|kitne din|कब|कितने दिन|tak aa", re.I)
 
 
@@ -542,9 +616,45 @@ def _missing_specs(text: str, products: list, reply: str) -> list:
     return out
 
 
-APPROVAL_RE = re.compile(r"approv|compensat|manager|supervisor|senior|exception|refund (?:it )?now|"
+DURATION_RE = re.compile(r"\d+\s*(?:-|to|se|से|or|ya)?\s*\d*\s*(?:business|working|kaam(?:kaaji)?|कामकाजी|calendar)?"
+                         r"\s*(?:days?|din|दिन|hours?|ghante|घंटे)|instant|turant|तुरंत", re.I)
+
+
+def _missing_refund_facts(text: str, rec, reply: str) -> list:
+    """Refund replies must carry the timeline, and refund-status replies the reference number."""
+    out = []
+    if re.search(r"refund|रिफ़ंड|रिफंड", reply, re.I) and not DURATION_RE.search(reply):
+        out.append("the refund timeline from the documents (e.g. 'within N business days' or the date via date_calc)")
+    if rec and REFUND_STATUS_RE.search(text or ""):
+        for k, v in rec.items():
+            if "rrn" in k.lower() and v and str(v) not in reply:
+                out.append(f"the refund reference number ({k} = {v}) so the customer can track it with the bank")
+    return out
+
+
+APPROVAL_RE = re.compile(r"approv|compensat|voucher|coupon de|discount de|manager|supervisor|senior|"
+                         r"exception|refund (?:it )?now|"
                          r"right now|abhi (?:kar|de|approve)|kar do na|de do|jaldi|escalat|complain|"
                          r"मंज़ूर|मंजूर|मुआवज", re.I)
+
+
+VERIFY_RETRY = {
+    "en": "Sorry, those details don't match our records for this order. Could you please check and tell me the "
+          "order ID and the last 4 digits of your registered phone number, or the delivery pincode, again?",
+    "hi-en": "Sorry, yeh details is order ke record se match nahi hui. Kripya check karke order ID aur registered "
+             "phone number ke last 4 digits ya delivery pincode dobara bataiye.",
+    "hi": "माफ़ कीजिए, ये विवरण इस ऑर्डर के रिकॉर्ड से मेल नहीं खाते। कृपया जाँचकर ऑर्डर आईडी और रजिस्टर्ड फ़ोन नंबर "
+          "के आख़िरी 4 अंक या डिलीवरी पिनकोड दोबारा बताइए।",
+}
+VERIFY_LOCKED = {
+    "en": "Sorry, the details still don't match, so I can't share any details of this order for security reasons. "
+          "Please call back from your registered phone number, or I can connect you to a colleague.",
+    "hi-en": "Maaf kijiye, details phir se match nahi hui, isliye security ke liye main is order ki details share "
+             "nahi kar sakti. Kripya apne registered phone number se dobara call karein, ya main aapko ek colleague "
+             "se jod sakti hoon.",
+    "hi": "माफ़ कीजिए, विवरण फिर से मेल नहीं खाए, इसलिए सुरक्षा कारणों से मैं इस ऑर्डर की जानकारी साझा नहीं कर सकती। "
+          "कृपया अपने रजिस्टर्ड फ़ोन नंबर से दोबारा कॉल करें, या मैं आपको किसी सहयोगी से जोड़ सकती हूँ।",
+}
 
 
 DONT_KNOW_RE = re.compile(r"don'?t have (?:any )?information|do not have (?:any )?information|"
@@ -578,7 +688,7 @@ def unsupported_dates(reply: str, sources: list) -> list:
 
 def parse_final(text: str) -> dict:
     """Parse 'DECISION: ... / EVIDENCE: ... / REPLY: ...' (lenient; falls back to the whole text)."""
-    text = (text or "").strip()
+    text = re.sub(r"[*_#`]+", "", text or "").strip()  # models sometimes bold the labels: **DECISION:**
     dec = re.search(r"DECISION\s*[:=]\s*\W*(answer|clarify|escalate|refuse)", text, re.I)
     ev = re.search(r"EVIDENCE\s*[:=]\s*(.*?)(?:\n|REPLY\s*[:=]|$)", text, re.I | re.S)
     rep = re.search(r"REPLY\s*[:=]\s*(.*)$", text, re.I | re.S)
@@ -627,6 +737,18 @@ NUM_WORDS = {"two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "se
              "nine": "9", "ten": "10", "twelve": "12", "fifteen": "15", "thirty": "30", "forty-eight": "48"}
 
 
+OFFER_RE = re.compile(r"shall i|should i|would you like|do you want|can i help|anything else|"
+                      r"kya main .*(?:kar|de) (?:doon|du|dun)|kya aap .*(?:chahti|chahte|chahenge|chahengi)|"
+                      r"kya main .*(?:karoon|karun|karu)\b|madad kar (?:sakta|sakti)|note anything|"
+                      r"aur kuch|क्या मैं .*(?:दूँ|दूं|करूँ|करूं)|क्या आप .*(?:चाहती|चाहते|चाहेंगे|चाहेंगी)|और कुछ|"
+                      r"मदद कर (?:सकता|सकती)", re.I)
+
+
+def _last_sentence(reply: str) -> str:
+    parts = [p for p in re.split(r"(?<=[.!?।])\s+", (reply or "").strip()) if p]
+    return parts[-1] if parts else ""
+
+
 def _answers_first(reply: str) -> bool:
     """True when the reply's first real sentence states a fact with a number (not a question)."""
     body = re.sub(r"^.*?\b(?:assistant|assistant hoon|सहायक हूँ)[.!।]?\s*", "", reply, count=1, flags=re.I)
@@ -637,10 +759,17 @@ def _answers_first(reply: str) -> bool:
 def _clean_reply(text: str) -> str:
     text = text.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"').replace("\u202f", " ")
     text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+    # "October 22nd, 2026" / "Oct 22" -> "22 October 2026"
+    text = re.sub(rf"\b({MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", r"\2 \1 \3", text)
+    text = re.sub(rf"\b({MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?!,?\s*\d{{4}})", r"\2 \1", text)
+    # "the 27th of October" -> "27 October" (spoken and graded form)
+    text = re.sub(rf"\b(?:the\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\s+of\s+({MONTHS})\b", r"\1 \2", text, flags=re.I)
+    text = re.sub(rf"\b(\d{{1,2}})(?:st|nd|rd|th)\s+({MONTHS})\b", r"\1 \2", text)
+    text = re.sub(r"\s*\(?\b(?:ticket(?: id| number)?[:\s]*)?TKT[0-9a-f]{6,}\b\)?", "", text, flags=re.I)
     # spoken dates need the year: "27 October" -> "27 October 2026" (dataset is frozen in 2026)
     text = re.sub(rf"\b(\d{{1,2}}(?:st|nd|rd|th)? (?:{MONTHS}))\b(?!,? \d{{4}})", r"\1 2026", text)
     text = re.sub(rf"\b((?:{MONTHS}) \d{{1,2}}(?:st|nd|rd|th)?)\b(?!,? \d{{4}})", r"\1, 2026", text)
-    text = re.sub(r"\b(" + "|".join(NUM_WORDS) + r")\b(?=[\s-]+[a-z])",
+    text = re.sub(r"(?<![-\w])(" + "|".join(NUM_WORDS) + r")\b(?=\s+[a-z])",
                   lambda m: NUM_WORDS[m.group(1).lower()], text, flags=re.I)
     text = re.sub(r"[*_#`>]+", "", text)
     text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.M)
