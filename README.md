@@ -74,7 +74,11 @@ plus `outputs/results.jsonl` / `results.csv` with the transcript, decision, tool
 document chunks used. Each file is its own call; files named with a turn marker
 (`PC002_1.wav`, `call7_turn2.wav`) are played in order as one call. `--independent` forces one call per file.
 
-**Text chat**: `python chat.py --debug`
+**Web demo (voice or text)**: `python app.py`, then open http://127.0.0.1:7860. Record with the mic or
+type; the reply is spoken with Gnani TTS and the side panel shows what STT heard, the decision, tool calls
+and the document sections used. "New call" starts a fresh conversation.
+
+**Text chat in the terminal**: `python chat.py --debug`
 
 **Evaluation on the practice set**
 
@@ -111,5 +115,9 @@ output, tool calls and retrieved sections for every failure.
 - **Deterministic steps in code.** Order lookup, caller verification (phone last 4 / pincode, one retry,
   then lock), product lookup for SKUs or product names the caller says, and escalation tickets run in
   code, so required tool calls cannot be skipped by the model.
+- **Recovery from unclear audio.** Empty or filler-only transcripts ("uh", "hello?") get a short
+  "sorry, could you say that again?" in the caller's language; an order number or verification value
+  heard with the wrong number of digits is read back ("I heard 8978 283, which is 7 digits…") and the
+  caller is asked to repeat, without spending an LLM call.
 - **Rate limits.** `LLM_MODELS` is a fallback chain (Groq models, optionally Gemini); the client waits on
   per-minute limits, retries network errors, and moves to the next model on daily limits.

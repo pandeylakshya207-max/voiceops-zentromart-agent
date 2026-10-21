@@ -180,9 +180,56 @@ class Agent:
                     parts.append(v.replace("_", " "))
         return " ".join(parts)
 
+    # ------------------------------------------------------------------ voice repair
+    def _scripted(self, user_text, norm, reply, decision="clarify") -> dict:
+        """A turn answered by code (no LLM): e.g. asking to repeat a misheard number."""
+        lang = self.state.lang or reply_language(user_text)
+        if self.state.turns == 0:
+            reply = AI_INTRO.get(lang, AI_INTRO["en"]) + reply
+        self.history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        self.state.turns += 1
+        self.last_turn = {"user": user_text, "normalized": norm["text"], "entities": norm["entities"],
+                          "reply": reply, "decision": decision, "tool_calls": [], "raw_final": "[scripted]",
+                          "retrieved": [], "evidence": [], "chunks": []}
+        return self.last_turn
+
+    def _repair(self, user_text, norm):
+        """Misheard numbers: an order ID or verification value with the wrong number of digits."""
+        last = self.history[-1]["content"] if self.history else ""
+        words = re.findall(r"[^\W\d_]+", norm["text"])
+        digits = "".join(re.findall(r"\d", norm["text"]))
+        if not digits or len(words) > 8:
+            return None
+        ents = norm["entities"]
+        lang = reply_language(user_text) if reply_language(user_text) != "en" else (self.state.lang or "en")
+        spoken = " ".join(digits[i:i + 4] for i in range(0, len(digits), 4))
+        if (not self.state.order_id and ASK_ORDER_RE.search(last) and not ents.get("order_ids")
+                and 5 <= len(digits) <= 11):
+            msg = {"en": f"Sorry, I heard {spoken}, which is {len(digits)} digits. Order numbers have 8 digits. "
+                         "Could you say it again slowly?",
+                   "hi-en": f"Sorry, maine {spoken} suna, jo {len(digits)} digits hai. Order number 8 digits ka "
+                            "hota hai. Kya aap dheere se dobara bata sakte hain?",
+                   "hi": f"माफ़ कीजिए, मैंने {spoken} सुना, जो {len(digits)} अंक हैं। ऑर्डर नंबर 8 अंकों का होता है। "
+                         "कृपया धीरे से दोबारा बताइए।"}[lang]
+            return self._scripted(user_text, norm, msg)
+        if (self.state.order_id and self.state.order_id not in self.state.verified_orders
+                and not self.state.locked and VERIFY_ASK_RE.search(last)
+                and not (ents.get("four_digit") or ents.get("pincodes")) and 3 <= len(digits) <= 7):
+            msg = {"en": f"Sorry, I heard {spoken}. Please tell me the last 4 digits of your registered phone "
+                         "number, or your 6-digit delivery pincode.",
+                   "hi-en": f"Sorry, maine {spoken} suna. Kripya registered phone number ke last 4 digits ya "
+                            "6 digit delivery pincode batayein.",
+                   "hi": f"माफ़ कीजिए, मैंने {spoken} सुना। कृपया अपने रजिस्टर्ड फ़ोन नंबर के आख़िरी 4 अंक या "
+                         "6 अंकों का डिलीवरी पिनकोड बताइए।"}[lang]
+            return self._scripted(user_text, norm, msg)
+        return None
+
     def turn(self, user_text: str) -> dict:
         self._turn_retrieved = []
         norm = normalize(user_text, data.sku_prefixes())
+        repaired = self._repair(user_text, norm)
+        if repaired:
+            return repaired
         hits = self.kb.search(self._retrieval_query(norm["text"]), k=self.top_k)
         # Approval / compensation / exception requests: always bring in who-decides & handover rules
         if any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE) for t in (user_text, norm["text"])):
@@ -457,6 +504,9 @@ DETAILS_RE = re.compile(r"upi|card|net ?banking|wallet|\bcod\b|cash|refund|retur
                         r"gst|invoice|bulk|ship|discount|price|offer|coupon|pickup|शिप|भेज|रद्द|कैंसल|इनवॉइस|"
                         r"warranty|assured|deliver|cancel|fee|charge|compensat|phone number|रिफंड|रिटर्न|लौटा|"
                         r"वापस|टूट|डिलीवरी|कैंसिल", re.I)
+
+
+VERIFY_ASK_RE = re.compile(r"last 4|last four|pincode|pin code|aakhri|आख़िरी|आखिरी|पिनकोड", re.I)
 
 
 ASK_ORDER_RE = re.compile(r"order (?:id|number|no)|ऑर्डर (?:आईडी|आई डी|नंबर|संख्या)|order ki id", re.I)

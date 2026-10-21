@@ -9,7 +9,18 @@ TTS_LANG = {"en": "en-IN", "hi-en": "hi-en", "hi": "hi-IN"}
 DIDNT_CATCH = {
     "en": "Sorry, I didn't catch that. Could you say it again?",
     "hi-en": "Sorry, main sun nahi paayi. Kya aap dobara bol sakte hain?",
+    "hi": "माफ़ कीजिए, मैं सुन नहीं पाई। क्या आप दोबारा बोल सकते हैं?",
 }
+FILLERS = {"uh", "um", "umm", "hmm", "hm", "ah", "er", "hello", "hi", "haan", "ok", "okay", "yes", "no",
+           "ji", "accha", "acha", "huh"}
+
+
+def is_unclear(heard: str) -> bool:
+    """Empty, noise-only or a lone filler word: ask the caller to repeat."""
+    words = re.findall(r"[^\W_]+", (heard or "").lower())
+    if not words:
+        return True
+    return len(words) <= 2 and all(w in FILLERS for w in words) and not re.search(r"\d", heard)
 
 
 def speech_text(reply: str) -> str:
@@ -53,11 +64,18 @@ class Voice:
 
     def voice_turn(self, audio_path, agent, output_file="reply.wav"):
         """The brief's voice_turn: audio in -> transcript -> agent -> spoken reply."""
-        heard = self.transcribe(audio_path)
-        if not heard:
-            reply = DIDNT_CATCH["en"]
-            turn = {"user": "", "reply": reply, "decision": "clarify", "tool_calls": [],
-                    "retrieved": [], "evidence": [], "chunks": []}
+        try:
+            heard = self.transcribe(audio_path)
+        except Exception as e:  # unreadable / too long / network: recover instead of crashing the call
+            print(f"[voice] STT failed: {e.__class__.__name__}: {e}")
+            heard = ""
+        if is_unclear(heard) and not (agent.state.turns == 0 and heard.strip()):
+            lang = agent.state.lang or "en"
+            reply = DIDNT_CATCH.get(lang, DIDNT_CATCH["en"])
+            if agent.state.turns == 0:
+                reply = "Hi, I'm ZentroMart's AI assistant. " + reply
+            turn = {"user": heard, "reply": reply, "decision": "clarify", "tool_calls": [],
+                    "retrieved": [], "evidence": [], "chunks": [], "unclear_audio": True}
         else:
             turn = agent.turn(heard)
             reply = turn["reply"]

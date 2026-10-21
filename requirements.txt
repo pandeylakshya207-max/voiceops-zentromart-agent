@@ -5,3 +5,4 @@ numpy>=1.26
 python-dotenv>=1.0
 sentence-transformers>=3.0
 gnani-vachana>=0.8
+gradio>=5,<6
