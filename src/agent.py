@@ -319,7 +319,7 @@ class Agent:
                              "result": {"skus": [p["sku"] for p in auto_products]}})
             evidence.extend(f"products.csv:{p['sku']}" for p in auto_products)
         date_checked = dontknow_checked = lang_checked = deadline_checked = order_checked = spec_checked = False
-        when_checked = damage_checked = calc_checked = False
+        when_checked = damage_checked = calc_checked = denial_checked = False
         for round_ in range(MAX_TOOL_ROUNDS + 1):
             force = round_ == MAX_TOOL_ROUNDS
             msg = self.llm.chat(messages, tools=TOOLS, tool_choice="none" if force else "auto",
@@ -371,6 +371,18 @@ class Agent:
                     messages.append({"role": "user", "content": (
                         "Check: your reply must also include: " + "; ".join(missing_spec)
                         + ". Final message in the DECISION/EVIDENCE/REPLY format.")})
+                    final = None
+                    continue
+                if (not denial_checked and round_ < MAX_TOOL_ROUNDS and final.get("decision") in (None, "answer")
+                        and UNSUPPORTED_DENIAL_RE.search(final["reply"] or "")
+                        and not PRIVACY_REQ_RE.search(user_text)):
+                    denial_checked = True
+                    messages.append({"role": "assistant", "content": raw_final})
+                    messages.append({"role": "user", "content": (
+                        "Check: your reply says something is not offered / not available / not done. Quote to yourself "
+                        "the section that literally says so. If no section literally states it, do not claim it: say "
+                        "\"I don't have information about that\" and offer to connect a colleague. "
+                        "Final message in the DECISION/EVIDENCE/REPLY format.")})
                     final = None
                     continue
                 searched = any(t["name"] == "search_kb" for t in tool_log)
@@ -498,8 +510,9 @@ class Agent:
                    and (ASK_ORDER_RE.search(reply) or VERIFY_ASK_RE.search(reply))
                    and re.search(r"\?|kripya|please|batay|bataiye|share|कृपया|बताइए", reply, re.I))
         locked_now = self.state.locked and not locked_before
-        refused = (not tickets_this_turn and (APPROVAL_RE.search(user_text) or CANCEL_REQ_RE.search(user_text))
-                   and _denies_request(reply))
+        refused = not tickets_this_turn and (
+            ((APPROVAL_RE.search(user_text) or CANCEL_REQ_RE.search(user_text)) and _denies_request(reply))
+            or (PRIVACY_REQ_RE.search(user_text) and NEG_RE.search(reply)))
         if tickets_this_turn:
             decision = "escalate"
         elif locked_now:
@@ -621,6 +634,15 @@ def _denies_request(reply: str) -> bool:
                 or re.search(rf"(?:{ACTION_WORDS})[^.!?।]{{0,45}}(?:{NEG_WORDS})", sent, re.I)):
             return True
     return False
+
+
+PRIVACY_REQ_RE = re.compile(r"(?:phone|number|address|details|contact|email|name)\b[^.?!]{0,30}\b(?:of|for)\s+"
+                            r"(?:the |that |this |my )?(?:person|someone|somebody|other|another|neighbou?r|customer|guy|"
+                            r"lady|man|woman)|someone else'?s|kisi aur ka|dusre ka|दूसरे (?:का|की|के)|किसी और", re.I)
+UNSUPPORTED_DENIAL_RE = re.compile(r"\bwe (?:don't|do not|doesn't|currently don't) (?:offer|have|provide|support)|"
+                                   r"operates? (?:purely|only) (?:as )?(?:an )?online|(?:isn't|is not|are not|aren't) "
+                                   r"(?:offered|available|supported) (?:at|in|on|for) |no (?:physical|offline) stores?|"
+                                   r"hum .{0,20}nahi (?:dete|karte)|हम .{0,20}नहीं (?:देते|करते)", re.I)
 
 
 APOLOGY_RE = re.compile(r"sorry|apolog|maaf|माफ़|माफ|क्षमा", re.I)

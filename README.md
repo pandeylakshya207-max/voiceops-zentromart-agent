@@ -27,12 +27,15 @@ python run.py --audio_dir path\to\customer_audio --out_dir outputs
 
 | | Step 1: prompt only | Step 2: RAG + tools |
 |---|---|---|
-| Questions answered correctly (52) | 17.3% | 78.8% |
+| Questions fully correct (52) | 17.3% | **98.1%** (51/52) |
+| Required facts present (`must_include`) | 26.9% | 100% |
 | Trap answers avoided (`must_not_include`) | 100% | 100% |
-| Correct decision (answer / clarify / escalate / refuse) | 76.9% | 84.6% |
-| Gold evidence found (retrieval recall) | n/a | 85.1% |
+| Correct decision | 76.9% | 98.1% |
+| Gold evidence retrieved | n/a | 87.9% |
 
-Same LLM family (Groq `gpt-oss`), same 52 questions, scored on their ASR-style `asr_text`.
+Step 3 (23 practice conversations, 96 turns): **100%** of turns fully correct, 100% expected tool calls. Details, failures and fixes are in [report.pdf](report.pdf).
+
+Same 52 questions, scored on their ASR-style `asr_text`. Step 2 rows: Groq gpt-oss-120b 25, gpt-oss-20b 21, Gemini 3.5 Flash Lite 6 (free-tier limits).
 Full per-question results are in `results/`.
 
 ## What is in each step

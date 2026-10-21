@@ -1,20 +1,21 @@
 {
   "step2_questions_asr_text": {
     "step": 2,
-    "n": 45,
-    "accuracy": 0.9778,
+    "n": 52,
+    "accuracy": 0.9808,
     "include_ok": 1.0,
     "exclude_ok": 1.0,
-    "decision_ok": 0.9778,
-    "model_calls": 1,
-    "tokens": 3025,
+    "decision_ok": 0.9808,
+    "model_calls": 5,
+    "tokens": 8540,
     "models": {
-      "openai/gpt-oss-120b": 24,
-      "openai/gpt-oss-20b": 21
+      "openai/gpt-oss-120b": 25,
+      "openai/gpt-oss-20b": 21,
+      "gemini:gemini-3.5-flash-lite": 6
     },
-    "evidence_recall": 0.874,
-    "seconds": 42.7,
-    "complete": false
+    "evidence_recall": 0.8794,
+    "seconds": 22.6,
+    "complete": true
   },
   "step1_questions_asr_text": {
     "step": 1,
