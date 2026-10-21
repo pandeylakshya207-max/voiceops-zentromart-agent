@@ -397,7 +397,7 @@ class Agent:
                     continue
                 rec = self.state.verified_orders.get(self.state.order_id or "")
                 if (not deadline_checked and rec and round_ < MAX_TOOL_ROUNDS
-                        and final.get("decision") in (None, "answer") and ELIGIBILITY_RE.search(user_text)
+                        and final.get("decision") not in ("escalate", "refuse") and ELIGIBILITY_RE.search(user_text)
                         and not (_dates_in(final["reply"]) - _dates_in(json.dumps(rec, default=str)) - {(20, "October")})):
                     deadline_checked = True
                     messages.append({"role": "assistant", "content": raw_final})
@@ -499,7 +499,7 @@ class Agent:
                    and re.search(r"\?|kripya|please|batay|bataiye|share|कृपया|बताइए", reply, re.I))
         locked_now = self.state.locked and not locked_before
         refused = (not tickets_this_turn and (APPROVAL_RE.search(user_text) or CANCEL_REQ_RE.search(user_text))
-                   and NEG_RE.search(reply))
+                   and _denies_request(reply))
         if tickets_this_turn:
             decision = "escalate"
         elif locked_now:
@@ -595,6 +595,34 @@ NEG_RE = re.compile(r"cannot|can't|can not|not possible|unable|not be cancel|not
                     r"possible nahi|sambhav nahi|nahi ho sakta|nahi kar sakt|nahi kiya ja sakta|"
                     r"nahi (?:diya|kiya|ho|mil)|nahin (?:diya|kiya|ho)|nahi ja|संभव नहीं|नहीं (?:किया|दिया|हो|मिल)|"
                     r"नहीं जा", re.I)
+ACTION_WORDS = (r"cancel\w*|voucher|compensat\w*|approv\w*|discount|refund|credit|replace\w*|कैंसिल|रद्द|"
+                r"मुआवज़ा|मुआवजा|वाउचर")
+NEG_WORDS = (r"cannot|can't|can not|can no longer|no longer|not able|unable|not possible|not eligible|won't|"
+             r"will not|not be|isn't|is not|nahi|nahin|नहीं|संभव नहीं")
+
+
+def _customer_can(reply: str) -> bool:
+    """The reply tells the customer they can do the requested action themselves (e.g. cancel in My Orders)."""
+    for sent in re.split(r"(?<=[.!?।])\s+", reply or ""):
+        if re.search(rf"(?:you can|you may|aap\b[^.!?।]{{0,50}}|आप[^.!?।]{{0,50}})(?:{ACTION_WORDS})[^.!?।]{{0,25}}"
+                     rf"(?:kar sakt|kar le|कर सकत|कर ले|from|in|via|yourself)|you can (?:\w+ ){{0,4}}(?:{ACTION_WORDS})",
+                     sent, re.I):
+            return True
+    return False
+
+
+def _denies_request(reply: str) -> bool:
+    """The reply says no to the thing that was asked for (negation within the same clause as the action),
+    unless it tells the customer they can do it themselves."""
+    if _customer_can(reply):
+        return False
+    for sent in re.split(r"(?<=[.!?।])\s+", reply or ""):
+        if (re.search(rf"(?:{NEG_WORDS})[^.!?।]{{0,45}}(?:{ACTION_WORDS})", sent, re.I)
+                or re.search(rf"(?:{ACTION_WORDS})[^.!?।]{{0,45}}(?:{NEG_WORDS})", sent, re.I)):
+            return True
+    return False
+
+
 APOLOGY_RE = re.compile(r"sorry|apolog|maaf|माफ़|माफ|क्षमा", re.I)
 REPEAT_RE = re.compile(r"(?:second|third|fourth|3rd|2nd|many|multiple|several) times?|again and again|"
                        r"calling again|baar baar|kitni baar|teesri baar|doosri baar|तीसरी बार|बार-बार|बार बार", re.I)
@@ -779,6 +807,7 @@ def _clean_reply(text: str) -> str:
     text = re.sub(rf"\b((?:{MONTHS}) \d{{1,2}}(?:st|nd|rd|th)?)\b(?!,? \d{{4}})", r"\1, 2026", text)
     text = re.sub(r"(?<![-\w])(" + "|".join(NUM_WORDS) + r")\b(?=\s+[a-z])",
                   lambda m: NUM_WORDS[m.group(1).lower()], text, flags=re.I)
+    text = re.sub(r"(?<!\()क्वालिटी चेक(?!\))", "गुणवत्ता जाँच (क्वालिटी चेक)", text)
     text = re.sub(r"[*_#`>]+", "", text)
     text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.M)
     text = re.sub(r"\s*\n+\s*", " ", text)
