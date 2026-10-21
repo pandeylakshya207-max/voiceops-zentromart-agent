@@ -1,19 +1,19 @@
 {
   "step2_questions_asr_text": {
     "step": 2,
-    "n": 44,
-    "accuracy": 0.9773,
+    "n": 45,
+    "accuracy": 0.9778,
     "include_ok": 1.0,
     "exclude_ok": 1.0,
-    "decision_ok": 0.9773,
-    "model_calls": 0,
-    "tokens": 0,
+    "decision_ok": 0.9778,
+    "model_calls": 1,
+    "tokens": 3025,
     "models": {
-      "openai/gpt-oss-120b": 23,
+      "openai/gpt-oss-120b": 24,
       "openai/gpt-oss-20b": 21
     },
-    "evidence_recall": 0.8708,
-    "seconds": 752.7,
+    "evidence_recall": 0.874,
+    "seconds": 42.7,
     "complete": false
   },
   "step1_questions_asr_text": {

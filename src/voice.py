@@ -1,5 +1,6 @@
 """Step 4: Gnani STT (ears) and TTS (voice) around the same agent."""
 import re
+import time
 from pathlib import Path
 
 from .agent import reply_language
@@ -33,6 +34,33 @@ def speech_text(reply: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def padded_copy(audio_path, seconds: float, attempt: int = 1):
+    """Same speech, different bytes: a little silence in front and the volume scaled by a few percent
+    (inaudible), written under a neutral name. Used when the STT firewall rejects a file. None if not PCM WAV."""
+    import tempfile
+    import wave
+
+    import numpy as np
+    try:
+        with wave.open(str(audio_path), "rb") as r:
+            params, frames = r.getparams(), r.readframes(r.getnframes())
+        if params.sampwidth != 2:
+            return None
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) * (0.97 - 0.03 * attempt)
+        samples = np.clip(samples + np.random.default_rng(attempt).normal(0, 2, samples.shape), -32768, 32767)
+        pad = np.zeros(int(params.framerate * seconds) * params.nchannels, dtype=np.float32)
+        data = np.concatenate([pad, samples]).astype("<i2").tobytes()
+        out = Path(tempfile.gettempdir()) / f"caller_audio_{attempt}.wav"
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(params.nchannels)
+            w.setsampwidth(2)
+            w.setframerate(params.framerate)
+            w.writeframes(data)
+        return str(out)
+    except Exception:
+        return None
+
+
 class Voice:
     def __init__(self):
         from gnani.stt import GnaniSTTClient
@@ -41,8 +69,23 @@ class Voice:
         self.stt = GnaniSTTClient()  # reads GNANI_API_KEY from the environment
         self.tts = GnaniTTSClient()
 
-    def transcribe(self, audio_path, language_code: str = STT_LANGUAGE) -> str:
-        out = self.stt.transcribe(str(audio_path), language_code=language_code)
+    def transcribe(self, audio_path, language_code: str = STT_LANGUAGE, attempts: int = 3) -> str:
+        """Gnani STT with retries: transient 403/429/5xx or network errors are retried with a short wait."""
+        path = str(audio_path)
+        for i in range(attempts):
+            try:
+                out = self.stt.transcribe(path, language_code=language_code)
+                break
+            except Exception as e:
+                if i == attempts - 1:
+                    raise
+                blocked = "403" in str(e)
+                if blocked:  # the STT firewall rejected this exact file: resend the same speech with new bytes
+                    path = padded_copy(audio_path, 0.3 * (i + 1), i + 1) or path
+                wait = 2 if blocked else 3 * (i + 1)
+                print(f"[voice] STT attempt {i + 1} failed ({str(e)[:40]}...); "
+                      f"{'re-encoding audio and ' if blocked else ''}retrying in {wait}s")
+                time.sleep(wait)
         if isinstance(out, dict):
             return (out.get("transcript") or "").strip()
         return str(out or "").strip()

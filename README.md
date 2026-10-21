@@ -74,6 +74,15 @@ plus `outputs/results.jsonl` / `results.csv` with the transcript, decision, tool
 document chunks used. Each file is its own call; files named with a turn marker
 (`PC002_1.wav`, `call7_turn2.wav`) are played in order as one call. `--independent` forces one call per file.
 
+**Make test audio** from the practice set with Gnani TTS (customer voice "Pranav"), then run the batch:
+
+```powershell
+python make_test_audio.py --out test_audio --questions 4 --conversation PC002
+python run.py --audio_dir test_audio --out_dir sample_outputs
+```
+
+`sample_outputs/` in this repo was produced exactly this way.
+
 **Web demo (voice or text)**: `python app.py`, then open http://127.0.0.1:7860. Record with the mic or
 type; the reply is spoken with Gnani TTS and the side panel shows what STT heard, the decision, tool calls
 and the document sections used. "New call" starts a fresh conversation.

@@ -111,7 +111,8 @@ class Agent:
 
     def _create_ticket(self, summary="", order_id=None, reason=None, intent=None, **_):
         t = getattr(self, "_turn_text", "")
-        only_verifying = (len(re.findall(r"[^\W\d_]+", t)) <= 6 and re.search(r"\d", t)
+        tn = getattr(self, "_turn_norm", t)  # normalized: "four thousand five hundred…" -> "4533"
+        only_verifying = (len(re.findall(r"[^\W\d_]+", tn)) <= 6 and re.search(r"\d", tn)
                           and not any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE)))
         if only_verifying and not self.state.locked:  # locked = verification failed twice: handover is right
             return {"created": False, "error": "The caller has only given verification details this turn and has "
@@ -252,6 +253,7 @@ class Agent:
         self._turn_retrieved = []
         self._turn_text = user_text
         norm = normalize(user_text, data.sku_prefixes())
+        self._turn_norm = norm["text"]
         repaired = self._repair(user_text, norm) or self._opener(user_text, norm)
         if repaired:
             return repaired
@@ -526,8 +528,14 @@ class Agent:
             reply = {"hi": "माफ़ कीजिए, कृपया दोबारा बताइए।", "hi-en": "Sorry, kya aap dobara bata sakte hain?"}.get(
                 lang, "Sorry, could you say that again?")
         if self.state.turns == 0 and not re.search(r"\bAI\b|एआई", reply):
-            reply = re.sub(r"^(?:namaste|namaskar|hi|hello|hey|नमस्ते)[!,.]*\s*", "", reply, flags=re.I)
-            reply = AI_INTRO.get(lang, AI_INTRO["en"]) + reply
+            if re.search(r"\b(?:virtual |support |customer support )?assistant\b|सहायक|सहायिका", reply, re.I):
+                # it already introduced itself: make that intro say AI instead of adding a second one
+                reply = re.sub(r"\b(?:virtual |support |customer support )?assistant\b", "AI assistant", reply,
+                               count=1, flags=re.I)
+                reply = re.sub(r"(?<!AI )(सहायक|सहायिका)", r"AI \1", reply, count=1)
+            else:
+                reply = re.sub(r"^(?:namaste|namaskar|hi|hello|hey|नमस्ते)[!,.]*\s*", "", reply, flags=re.I)
+                reply = AI_INTRO.get(lang, AI_INTRO["en"]) + reply
 
         cited = [e for e in (final.get("evidence") or []) if isinstance(e, str)]
         known = set(self.kb.by_id)

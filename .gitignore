@@ -7,5 +7,6 @@ dataset/
 outputs/
 results/*.wav
 *.wav
+!sample_outputs/*.wav
 !sample_outputs/**/*.wav
 tickets_created.csv

@@ -17,13 +17,19 @@ DIGITS = {
 AMBIGUOUS = {"o": "0", "oh": "0", "to": "2", "too": "2", "for": "4", "ate": "8",
              "won": "1", "ek": "1", "do": "2", "free": "3", "tree": "3"}
 MULTIPLIERS = {"double": 2, "triple": 3}
+TEENS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+         "seventeen": 17, "eighteen": 18, "nineteen": 19}
+TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fourty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+        "eighty": 80, "ninety": 90}
+SCALES = {"hundred": 100, "thousand": 1000, "lakh": 100000, "lac": 100000}
+AMBIGUOUS["and"] = ""
 
 _TOKEN = re.compile(r"[A-Za-zऀ-ॿ]+|\d+|[^\sA-Za-z\dऀ-ॿ]")
 
 
 def _spoken_kind(tok: str):
     t = tok.lower()
-    if t in DIGITS:
+    if t in DIGITS or t in TEENS or t in TENS or t in SCALES:
         return "word"
     if t in AMBIGUOUS:
         return "amb"
@@ -60,16 +66,7 @@ def spoken_digits_to_numerals(text: str) -> str:
                 j += 1
             # need at least one real spelled digit in the run to convert
             if any(kinds[r] == "word" for r in run) or (len(run) > 1 and any(kinds[r] == "mult" for r in run)):
-                digits, mult = "", 1
-                for r in run:
-                    t = tokens[r].lower()
-                    if kinds[r] == "mult":
-                        mult = MULTIPLIERS[t]
-                        continue
-                    d = tokens[r] if kinds[r] == "num" else DIGITS.get(t, AMBIGUOUS.get(t, ""))
-                    digits += d * mult
-                    mult = 1
-                out.append(digits)
+                out.append(_run_to_digits([tokens[r] for r in run], [kinds[r] for r in run]))
             else:
                 out.extend(tokens[r] for r in run)
             i = j
@@ -81,6 +78,54 @@ def spoken_digits_to_numerals(text: str) -> str:
     text2 = re.sub(r"\s*-\s*", "-", text2)
     text2 = re.sub(r"\s+([,.?!])", r"\1", text2)
     return text2
+
+
+def _unit(t: str, kind: str):
+    return int(t) if kind == "num" else int(DIGITS.get(t, AMBIGUOUS.get(t, "0")) or 0)
+
+
+def _run_to_digits(toks, kinds) -> str:
+    """'eight nine seven eight' -> 8978 · 'forty five thirty three' -> 4533 ·
+    'four thousand five hundred thirty three' -> 4533 · 'double five' -> 55."""
+    low = [t.lower() for t in toks]
+    if any(t in SCALES for t in low):  # a cardinal number
+        total, cur = 0, 0
+        for t, k in zip(low, kinds):
+            if t in SCALES:
+                if SCALES[t] == 100:
+                    cur = max(cur, 1) * 100
+                else:
+                    total += max(cur, 1) * SCALES[t]
+                    cur = 0
+            elif t in TENS:
+                cur += TENS[t]
+            elif t in TEENS:
+                cur += TEENS[t]
+            elif k in ("word", "amb", "num"):
+                cur += _unit(t, k)
+        return str(total + cur)
+    out, mult, i = "", 1, 0
+    while i < len(low):  # spoken digit by digit or in pairs
+        t, k = low[i], kinds[i]
+        if k == "mult":
+            mult = MULTIPLIERS[t]
+        elif t in TENS:
+            val = TENS[t]
+            if i + 1 < len(low) and low[i + 1] in DIGITS and DIGITS[low[i + 1]] != "0":
+                val += int(DIGITS[low[i + 1]])
+                i += 1
+            out += str(val)
+        elif t in TEENS:
+            out += str(TEENS[t])
+        elif k == "num":
+            out += toks[i] * mult
+            mult = 1
+        else:
+            d = DIGITS.get(t, AMBIGUOUS.get(t, ""))
+            out += d * mult
+            mult = 1
+        i += 1
+    return out
 
 
 def _digit_groups(text: str):
