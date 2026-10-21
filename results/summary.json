@@ -1,0 +1,51 @@
+{
+  "step2_questions_asr_text": {
+    "step": 2,
+    "n": 47,
+    "accuracy": 0.9149,
+    "include_ok": 0.9574,
+    "exclude_ok": 1.0,
+    "decision_ok": 0.9362,
+    "model_calls": 11,
+    "tokens": 30180,
+    "models": {
+      "openai/gpt-oss-20b": 24,
+      "openai/gpt-oss-120b": 23
+    },
+    "evidence_recall": 0.8566,
+    "seconds": 1002.5,
+    "complete": false
+  },
+  "step1_questions_asr_text": {
+    "step": 1,
+    "n": 52,
+    "accuracy": 0.1731,
+    "include_ok": 0.2692,
+    "exclude_ok": 1.0,
+    "decision_ok": 0.7692,
+    "model_calls": 52,
+    "tokens": 17260,
+    "models": [
+      "openai/gpt-oss-120b"
+    ],
+    "seconds": 79.5
+  },
+  "step3_conversations": {
+    "step": 3,
+    "n": 5,
+    "accuracy": 0.8,
+    "include_ok": 1.0,
+    "exclude_ok": 1.0,
+    "decision_ok": 1.0,
+    "model_calls": 7,
+    "tokens": 20857,
+    "models": [
+      "openai/gpt-oss-120b",
+      "llama-3.3-70b-versatile",
+      "openai/gpt-oss-20b"
+    ],
+    "evidence_recall": 0.7333,
+    "tools_ok": 0.8,
+    "seconds": 39.9
+  }
+}

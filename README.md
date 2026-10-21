@@ -9,6 +9,32 @@ when policy requires, and talks over voice through **Gnani STT/TTS**.
 customer audio → Gnani STT → normalizer → agent (LLM + hybrid RAG + tools + call memory) → Gnani TTS → spoken reply
 ```
 
+**Repository:** https://github.com/pandeylakshya207-max/voiceops-zentromart-agent
+
+## Quick start for evaluators
+
+```powershell
+git clone https://github.com/pandeylakshya207-max/voiceops-zentromart-agent.git voiceops
+cd voiceops
+python -m venv .venv; .\.venv\Scripts\Activate.ps1      # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+copy .env.example .env                                   # Linux/macOS: cp .env.example .env ; then add your keys
+# put the capstone dataset at dataset/Capstone_Project_Dataset_FTTT_2026 (or set DATASET_DIR in .env)
+python run.py --audio_dir path\to\customer_audio --out_dir outputs
+```
+
+## Results on the practice set
+
+| | Step 1: prompt only | Step 2: RAG + tools |
+|---|---|---|
+| Questions answered correctly (52) | 17.3% | 78.8% |
+| Trap answers avoided (`must_not_include`) | 100% | 100% |
+| Correct decision (answer / clarify / escalate / refuse) | 76.9% | 84.6% |
+| Gold evidence found (retrieval recall) | n/a | 85.1% |
+
+Same LLM family (Groq `gpt-oss`), same 52 questions, scored on their ASR-style `asr_text`.
+Full per-question results are in `results/`.
+
 ## What is in each step
 
 | Step | What it adds | Code |
@@ -21,7 +47,7 @@ customer audio → Gnani STT → normalizer → agent (LLM + hybrid RAG + tools 
 ## Setup (Windows PowerShell)
 
 ```powershell
-git clone <this repo> voiceops; cd voiceops
+git clone https://github.com/pandeylakshya207-max/voiceops-zentromart-agent.git voiceops; cd voiceops
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env      # then put your keys in .env
@@ -61,7 +87,10 @@ python evaluate.py --step 3   # conversations         -> results/step3_conversat
 Scoring follows the practice files: every `;`-group of `must_include` must appear (`/` = alternatives),
 nothing from `must_not_include`, decision within `acceptable_decisions`, expected tool calls made
 with matching arguments, and `gold_evidence` recall over retrieved + cited chunks.
-Summaries accumulate in `results/summary.json`.
+Summaries accumulate in `results/summary.json`. Results are saved after every item:
+`--resume` continues an interrupted run (e.g. after a free-tier daily limit) and
+`--redo PQ0040,PQ0044` re-runs chosen items and replaces their results. `--debug` prints the raw model
+output, tool calls and retrieved sections for every failure.
 
 ## Design notes
 
@@ -73,5 +102,14 @@ Summaries accumulate in `results/summary.json`.
   a real `create_ticket` call; the reply only mentions a ticket when one exists.
 - **Privacy.** Order details are only shown after the phone last-4 or delivery pincode matches; two
   failures lock the order for the rest of the call.
-- **Rate limits.** `LLM_MODELS` is a fallback chain across Groq and Gemini models; the client switches model on
-  daily limits and waits on per-minute limits.
+- **Verifier loop.** Before a reply is spoken, code checks it and sends the model back once when it
+  (a) states a date no tool or document gave, or ignores the date `date_calc` computed, (b) says "I don't
+  know" without having searched, (c) asks for an order ID or other detail it does not need, (d) answers in
+  the wrong language, (e) leaves out the deadline for a return/claim on a verified order, (f) leaves out a
+  catalog fact that was asked (e.g. warranty months), or (g) handles a damage or account-security report
+  without checking whether a human team must take it.
+- **Deterministic steps in code.** Order lookup, caller verification (phone last 4 / pincode, one retry,
+  then lock), product lookup for SKUs or product names the caller says, and escalation tickets run in
+  code, so required tool calls cannot be skipped by the model.
+- **Rate limits.** `LLM_MODELS` is a fallback chain (Groq models, optionally Gemini); the client waits on
+  per-minute limits, retries network errors, and moves to the next model on daily limits.

@@ -23,7 +23,7 @@ RESULTS_DIR = ROOT / "results"
 # On a daily limit / unavailable model the agent moves to the next one.
 LLM_MODELS = [m.strip() for m in os.getenv(
     "LLM_MODELS",
-    "openai/gpt-oss-120b,openai/gpt-oss-20b,gemini:gemini-flash-latest",
+    "openai/gpt-oss-120b,openai/gpt-oss-20b",
 ).split(",") if m.strip()]
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 

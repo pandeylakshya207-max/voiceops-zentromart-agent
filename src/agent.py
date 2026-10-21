@@ -185,7 +185,7 @@ class Agent:
         norm = normalize(user_text, data.sku_prefixes())
         hits = self.kb.search(self._retrieval_query(norm["text"]), k=self.top_k)
         # Approval / compensation / exception requests: always bring in who-decides & handover rules
-        if any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE) for t in (user_text, norm["text"])):
+        if any(rx.search(t) for rx in (APPROVAL_RE, DAMAGE_RE, SECURITY_RE) for t in (user_text, norm["text"])):
             have = {c.id for c, _ in hits}
             for c, sc in self.kb.search("escalation human handover who decides approval threshold "
                                         "priority resolution compensation " + norm["text"], k=4):
@@ -233,7 +233,7 @@ class Agent:
                              "result": {"skus": [p["sku"] for p in auto_products]}})
             evidence.extend(f"products.csv:{p['sku']}" for p in auto_products)
         date_checked = dontknow_checked = lang_checked = deadline_checked = order_checked = spec_checked = False
-        when_checked = damage_checked = False
+        when_checked = damage_checked = calc_checked = False
         for round_ in range(MAX_TOOL_ROUNDS + 1):
             force = round_ == MAX_TOOL_ROUNDS
             msg = self.llm.chat(messages, tools=TOOLS, tool_choice="none" if force else "auto",
@@ -320,6 +320,18 @@ class Agent:
                         "window has passed. Final message in the DECISION/EVIDENCE/REPLY format.")})
                     final = None
                     continue
+                computed = [t["result"].get(k) for t in tool_log if t["name"] == "date_calc"
+                            for k in ("after_business_days", "after_calendar_days") if t["result"].get(k)]
+                if (not calc_checked and computed and round_ < MAX_TOOL_ROUNDS
+                        and not any(_dates_in(c) & _dates_in(final["reply"] or "") for c in computed)):
+                    calc_checked = True
+                    messages.append({"role": "assistant", "content": raw_final})
+                    messages.append({"role": "user", "content": (
+                        f"Check: date_calc returned {' / '.join(computed)}, but your reply states a different date. "
+                        "Use the date_calc result exactly (for a range like 3-5 business days, the result for the "
+                        "LATEST number is the date to give). Final message in the DECISION/EVIDENCE/REPLY format.")})
+                    final = None
+                    continue
                 user_dates = _dates_in(user_text) | _dates_in(norm["text"])
                 if (not when_checked and user_dates and WHEN_RE.search(user_text) and round_ < MAX_TOOL_ROUNDS
                         and final.get("decision") in (None, "answer")
@@ -336,15 +348,17 @@ class Agent:
                 # 2) damage reports: is a human team required (e.g. value thresholds)?
                 ticketed = any(t["name"] == "create_ticket" for t in tool_log) or self.state.tickets
                 if (not damage_checked and not ticketed and round_ < MAX_TOOL_ROUNDS
-                        and DAMAGE_RE.search(user_text + " " + norm["text"])
+                        and (DAMAGE_RE.search(user_text + " " + norm["text"])
+                             or SECURITY_RE.search(user_text + " " + norm["text"]))
                         and final.get("decision") in (None, "answer", "clarify")):
                     damage_checked = True
                     price = ", ".join(f"{p.get('sku')}: " + ", ".join(f"{k}={v}" for k, v in p.items() if "price" in k)
                                       for p in auto_products) or "unknown"
                     messages.append({"role": "assistant", "content": raw_final})
                     messages.append({"role": "user", "content": (
-                        f"Check: this is a damage/wrong/missing-item report (catalog price: {price}). Re-read the "
-                        "damaged-item and escalation sections: if they say a specific team must handle this case "
+                        f"Check: this is a damage/wrong/missing-item or account-security report (catalog price: "
+                        f"{price}). Re-read the damaged-item, payment/security and escalation sections: if they say a "
+                        "specific team must handle this case "
                         "(e.g. above a value threshold), call create_ticket now and tell the customer it has been "
                         "passed to that team (DECISION: escalate). Otherwise keep your answer. "
                         "Final message in the DECISION/EVIDENCE/REPLY format.")})
@@ -450,6 +464,11 @@ ASK_ORDER_RE = re.compile(r"order (?:id|number|no)|ऑर्डर (?:आईड�
 
 ELIGIBILITY_RE = re.compile(r"\b(return|returns|returnable|replace|replacement|exchange|warranty|claim)\b|"
                             r"lauta|lautana|wapas kar|रिटर्न|लौटा|वापस", re.I)
+
+
+SECURITY_RE = re.compile(r"never placed|didn'?t place|did not place|not placed by me|unauthori[sz]ed|fraud|hack|"
+                         r"someone (?:else )?(?:used|ordered|placed)|not me|without my|stolen|scam|"
+                         r"maine (?:order )?nahi kiya|मैंने .*नहीं किया|धोखा", re.I)
 
 
 WHEN_RE = re.compile(r"\bwhen\b|by when|how long|kab|kitne din|कब|कितने दिन|tak aa", re.I)
